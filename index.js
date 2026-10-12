@@ -1,57 +1,127 @@
 /**
  * ============================================================
  * DAILY BIBLE VERSE IMAGE CARD AUTOMATION
+ * KIMANGU YOUTH MINISTRY
  * ============================================================
- * Ministry: Kimangu Youth Ministry
- * Features:
- *   - Fetches dynamic daily Bible verse (NKJV).
- *   - Generates custom dark-mode image card with SDA logo.
- *   - Fixes whatsapp-web.js media memoization bug.
- *   - Robust connection handling and clean exit.
+ *
+ * WhatsApp: Baileys
+ * Bible API: OurManna (NKJV)
+ * Image generation: SVG + Sharp
+ * Schedule: 5:00 AM Africa/Nairobi
+ *
+ * FEATURES:
+ * 1. Fetches the daily Bible verse.
+ * 2. Generates a professional Bible verse image.
+ * 3. Displays the SDA logo properly positioned at the top.
+ * 4. Automatically adjusts text size, fonts, and spacing.
+ * 5. Saves the generated image as daily-verse.png.
+ * 6. Automatically finds and sends to "KIMANGU ADVENTIST YOUTHS FORUM".
+ * 7. Schedules delivery every day at 5:00 AM Kenya time.
+ * 8. Reconnects automatically after connection interruptions.
+ *
  * ============================================================
  */
 
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const {
+    makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason
+} = require('@whiskeysockets/baileys');
+
+const { Boom } = require('@hapi/boom');
+const pino = require('pino');
+const cron = require('node-cron');
 const axios = require('axios');
-const path = require('path');
+const qrcode = require('qrcode-terminal');
+const sharp = require('sharp');
+
 const fs = require('fs');
-const puppeteer = require('puppeteer');
+const path = require('path');
 
 // ============================================================
 // CONFIGURATION
 // ============================================================
 
 const CONFIG = {
-    // The target WhatsApp Group ID
-    groupId: '120363413687066419@g.us',
-    // Local Timezone for date formatting
+    // Target WhatsApp group name
+    groupName: 'KIMANGU ADVENTIST YOUTHS FORUM',
+
+    // Kenya timezone.
     timezone: 'Africa/Nairobi',
-    chromePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+
+    // Daily delivery at 5:00 AM.
+    schedule: '0 5 * * *',
+
+    // Bible translation.
+    bibleVersion: 'nkjv',
+
+    // Generated image.
+    imagePath: path.join(__dirname, 'daily-verse.png'),
+
+    // Official SDA logo. Upload this file to your project.
+    logoPath: path.join(__dirname, 'sda-logo.png'),
+
+    // Persistent WhatsApp authentication.
+    authDirectory: path.join(__dirname, 'auth_info_baileys'),
+
+    // Request timeout.
+    requestTimeout: 30000
 };
 
 // ============================================================
-// SDA LOGO - BASE64 PNG
+// GLOBAL STATE
 // ============================================================
 
-const SDA_LOGO_BASE64 =
-    'data:image/png;base64,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';
+let sock = null;
+let resolvedGroupId = null;
+let reconnectTimer = null;
+let isConnecting = false;
+let isSending = false;
+let isShuttingDown = false;
+let cronTask = null;
+let lastScheduledDate = null;
+let initialTestStarted = false;
 
 // ============================================================
-// WHATSAPP CLIENT
+// LOGGING
 // ============================================================
 
-const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: path.join(__dirname, '.wwebjs_auth') }),
-    puppeteer: {
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+function log(message) {
+    console.log(
+        `[${new Date().toLocaleString('en-KE', {
+            timeZone: CONFIG.timezone
+        })}] ${message}`
+    );
+}
+
+// ============================================================
+// DATE HELPERS
+// ============================================================
+
+function getKenyaDateParts() {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: CONFIG.timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    }).formatToParts(new Date());
+
+    const result = {};
+
+    for (const part of parts) {
+        if (part.type !== 'literal') {
+            result[part.type] = part.value;
+        }
     }
-});
 
-// ============================================================
-// GET CURRENT KENYA DATE
-// ============================================================
+    return result;
+}
+
+function getKenyaDateKey() {
+    const date = getKenyaDateParts();
+
+    return `${date.year}-${date.month}-${date.day}`;
+}
 
 function getFormattedKenyaDate() {
     return new Intl.DateTimeFormat('en-KE', {
@@ -64,307 +134,556 @@ function getFormattedKenyaDate() {
 }
 
 // ============================================================
-// FETCH DAILY BIBLE VERSE
+// TEXT HELPERS
 // ============================================================
 
-async function fetchBibleVerse() {
-    const url =
-        'https://beta.ourmanna.com/api/v1/get?format=json&order=daily&version=nkjv';
-
-    const response = await axios.get(url, {
-        timeout: 20000
-    });
-
-    const details = response.data.verse.details;
-
-    return {
-        reference: details.reference,
-        text: details.text.trim(),
-        translation: details.version || 'NKJV'
-    };
+function cleanText(value) {
+    return String(value ?? '')
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
-// ============================================================
-// GENERATE VERSE CARD IMAGE
-// ============================================================
-
-async function generateVerseCardImage(verse) {
-    const dateStr = getFormattedKenyaDate();
-
-    const tempHtmlPath = path.resolve(__dirname, 'temp-card.html');
-    const tempImagePath = path.resolve(__dirname, 'verse-card.png');
-
-    const htmlContent = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@500;700&display=swap');
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            width: 650px;
-            background-color: #101c2c;
-            padding: 40px;
-            font-family: 'Inter', sans-serif;
-        }
-
-        .header {
-            display: flex;
-            align-items: center;
-            color: #f59e0b;
-            font-weight: 700;
-            font-size: 16px;
-            margin-bottom: 20px;
-            letter-spacing: 0.5px;
-        }
-
-        .date {
-            font-size: 13px;
-            color: #94a3b8;
-            margin-bottom: 15px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .verse-text {
-            font-family: 'Merriweather', serif;
-            font-style: italic;
-            font-size: 20px;
-            line-height: 1.6;
-            color: #f8fafc;
-            margin-bottom: 25px;
-            overflow-wrap: break-word;
-        }
-
-        .reference {
-            font-family: 'Inter', sans-serif;
-            font-weight: 700;
-            color: #f59e0b;
-            font-size: 15px;
-        }
-
-        .footer {
-            margin-top: 30px;
-            border-top: 1px solid #1e293b;
-            padding-top: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-        }
-
-        .sda-logo {
-            width: 40px;
-            height: 40px;
-            object-fit: contain;
-            display: block;
-            flex-shrink: 0;
-        }
-
-        .footer span {
-            font-size: 13px;
-            color: #94a3b8;
-            font-weight: 500;
-            letter-spacing: 0.5px;
-        }
-    </style>
-</head>
-
-<body>
-    <div class="header">📖 Verse of the Day</div>
-
-    <div class="date">${escapeHtml(dateStr)}</div>
-
-    <div class="verse-text">“${escapeHtml(verse.text)}”</div>
-
-    <div class="reference">
-        ${escapeHtml(verse.reference)} (${escapeHtml(verse.translation)})
-    </div>
-
-    <div class="footer">
-        <img
-            class="sda-logo"
-            src="${SDA_LOGO_BASE64}"
-            alt="Seventh-day Adventist Church Logo"
-        >
-
-        <span>Kimangu Youth Ministry</span>
-    </div>
-</body>
-</html>
-`;
-
-    fs.writeFileSync(tempHtmlPath, htmlContent, 'utf8');
-
-    let browser;
-
-    try {
-        browser = await puppeteer.launch({
-            headless: true,
-            executablePath: CONFIG.chromePath,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage'
-            ]
-        });
-
-        const page = await browser.newPage();
-
-        await page.setViewport({
-            width: 650,
-            height: 700,
-            deviceScaleFactor: 2
-        });
-
-        await page.goto(
-            'file://' + tempHtmlPath.replace(/\\/g, '/'),
-            { waitUntil: 'networkidle0', timeout: 60000 }
-        );
-
-        await page.waitForFunction(() => {
-            const logo = document.querySelector('.sda-logo');
-            return logo && logo.complete && logo.naturalWidth > 0;
-        }, { timeout: 15000 });
-
-        const bodyElement = await page.$('body');
-
-        await bodyElement.screenshot({
-            path: tempImagePath,
-            type: 'png',
-            captureBeyondViewport: true
-        });
-
-        return tempImagePath;
-
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
-
-        if (fs.existsSync(tempHtmlPath)) {
-            fs.unlinkSync(tempHtmlPath);
-        }
-    }
-}
-
-// ============================================================
-// ESCAPE HTML SPECIAL CHARACTERS
-// ============================================================
-
-function escapeHtml(value) {
+function escapeXml(value) {
     return String(value)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
+        .replace(/'/g, '&apos;');
 }
 
 // ============================================================
-// WHATSAPP QR CODE
+// FIND GROUP JID BY NAME
 // ============================================================
 
-client.on('qr', qr => {
-    console.log('\nScan this QR code with your WhatsApp:');
-    qrcode.generate(qr, { small: true });
-});
-
-// ============================================================
-// WHATSAPP READY: GENERATE AND SEND VERSE CARD
-// ============================================================
-
-client.on('ready', async () => {
-    console.log('\n========================================');
-    console.log('WHATSAPP CLIENT READY');
-    console.log('DAILY BIBLE VERSE AUTOMATION');
-    console.log('========================================');
-
-    let imagePath;
+async function resolveGroupId() {
+    if (resolvedGroupId) return resolvedGroupId;
 
     try {
-        console.log('Fetching the daily Bible verse...');
+        log(`Searching for group: "${CONFIG.groupName}"...`);
+        const groups = await sock.groupFetchAllParticipating();
 
-        const verse = await fetchBibleVerse();
+        for (const [jid, group] of Object.entries(groups)) {
+            if (group.subject && group.subject.trim().toLowerCase() === CONFIG.groupName.toLowerCase()) {
+                resolvedGroupId = jid;
+                log(`Successfully found group JID: ${resolvedGroupId} (${group.subject})`);
+                return resolvedGroupId;
+            }
+        }
 
-        console.log(`Verse: ${verse.reference}`);
-        console.log('Generating verse card with SDA logo...');
+        throw new Error(`Could not find a joined group named "${CONFIG.groupName}". Please ensure the bot is added to this group.`);
+    } catch (error) {
+        log(`Error resolving group ID: ${error.message}`);
+        throw error;
+    }
+}
 
-        imagePath = await generateVerseCardImage(verse);
+// ============================================================
+// FETCH DAILY BIBLE VERSE
+// ============================================================
 
-        const fileBuffer = fs.readFileSync(imagePath);
+async function fetchBibleVerse() {
+    const url =
+        'https://beta.ourmanna.com/api/v1/get' +
+        '?format=json&order=daily&version=' +
+        encodeURIComponent(CONFIG.bibleVersion);
 
-        const media = new MessageMedia(
-            'image/png',
-            fileBuffer.toString('base64'),
-            'verse-card.png'
+    log('Fetching the daily Bible verse...');
+
+    const response = await axios.get(url, {
+        timeout: CONFIG.requestTimeout
+    });
+
+    const details = response.data?.verse?.details;
+
+    if (!details || !details.reference || !details.text) {
+        throw new Error(
+            'The Bible API returned incomplete verse information.'
+        );
+    }
+
+    const verse = {
+        reference: cleanText(details.reference),
+        text: cleanText(details.text),
+        translation: cleanText(details.version || 'NKJV')
+    };
+
+    log(`Bible verse retrieved: ${verse.reference}`);
+
+    return verse;
+}
+
+// ============================================================
+// TEXT WRAPPING
+// ============================================================
+
+function wrapText(text, maxChars) {
+    const words = String(text).trim().split(/\s+/);
+    const lines = [];
+    let line = '';
+
+    for (const word of words) {
+        const candidate = line
+            ? `${line} ${word}`
+            : word;
+
+        if (candidate.length > maxChars && line) {
+            lines.push(line);
+            line = word;
+        } else {
+            line = candidate;
+        }
+    }
+
+    if (line) {
+        lines.push(line);
+    }
+
+    return lines;
+}
+
+// ============================================================
+// GENERATE BIBLE VERSE IMAGE
+// ============================================================
+
+async function generateVerseCardBuffer(verse) {
+    const width = 1080;
+    const height = 1350;
+
+    let logoBuffer = null;
+
+    if (fs.existsSync(CONFIG.logoPath)) {
+        try {
+            logoBuffer = await sharp(CONFIG.logoPath)
+                .resize(130, 130, {
+                    fit: 'contain',
+                    background: {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        alpha: 0
+                    }
+                })
+                .png()
+                .toBuffer();
+
+            log('Official SDA logo loaded successfully.');
+        } catch (error) {
+            log(`Could not load SDA logo: ${error.message}`);
+        }
+    } else {
+        log('SDA logo not found. Upload sda-logo.png to display it.');
+    }
+
+    let fontSize = 38;
+    let maxChars = 34;
+    let lines = wrapText(verse.text, maxChars);
+
+    while (lines.length > 11 && fontSize > 26) {
+        fontSize -= 2;
+        maxChars += 3;
+        lines = wrapText(verse.text, maxChars);
+    }
+
+    const lineHeight = fontSize * 1.45;
+
+    const verseStartY = 510;
+    const verseBottomY =
+        verseStartY + (lines.length - 1) * lineHeight;
+
+    const referenceY = verseBottomY + lineHeight + 35;
+    const translationY = referenceY + 40;
+    const dateY = Math.max(translationY + 60, 1180);
+    const footerY = 1245;
+
+    const verseSvg = lines.map((line, index) => `
+        <text
+            x="540"
+            y="${verseStartY + (index * lineHeight)}"
+            text-anchor="middle"
+            font-family="Georgia, serif"
+            font-style="italic"
+            font-weight="normal"
+            font-size="${fontSize}"
+            fill="#F8FAFC">${escapeXml(line)}</text>
+    `).join('');
+
+    const logoPlaceholder = logoBuffer
+        ? ''
+        : `
+            <circle cx="540" cy="115" r="45"
+                    fill="#FFFFFF" opacity="0.08"/>
+            <text x="540" y="132"
+                  text-anchor="middle"
+                  font-size="52"
+                  fill="#FFE6A0">✦</text>
+        `;
+
+    const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg"
+         width="${width}"
+         height="${height}"
+         viewBox="0 0 ${width} ${height}">
+
+        <defs>
+            <linearGradient id="background"
+                            x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#071B16"/>
+                <stop offset="55%" stop-color="#123B2D"/>
+                <stop offset="100%" stop-color="#07111F"/>
+            </linearGradient>
+
+            <linearGradient id="gold"
+                            x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#D6A84F"/>
+                <stop offset="50%" stop-color="#FFE6A0"/>
+                <stop offset="100%" stop-color="#D6A84F"/>
+            </linearGradient>
+        </defs>
+
+        <rect width="${width}"
+              height="${height}"
+              fill="url(#background)"/>
+
+        <rect x="35"
+              y="35"
+              width="1010"
+              height="1280"
+              rx="30"
+              fill="none"
+              stroke="url(#gold)"
+              stroke-width="3"/>
+
+        ${logoPlaceholder}
+
+        <text x="540"
+              y="230"
+              text-anchor="middle"
+              font-family="DejaVu Sans, sans-serif"
+              font-size="38"
+              font-weight="bold"
+              letter-spacing="5"
+              fill="#FFE6A0">KIMANGU</text>
+
+        <text x="540"
+              y="270"
+              text-anchor="middle"
+              font-family="DejaVu Sans, sans-serif"
+              font-size="24"
+              letter-spacing="4"
+              fill="#FFFFFF">YOUTH MINISTRY</text>
+
+        <rect x="230"
+              y="310"
+              width="620"
+              height="60"
+              rx="18"
+              fill="url(#gold)"/>
+
+        <text x="540"
+              y="350"
+              text-anchor="middle"
+              font-family="DejaVu Sans, sans-serif"
+              font-size="26"
+              font-weight="bold"
+              letter-spacing="2"
+              fill="#10261F">DAILY BIBLE VERSE</text>
+
+        <line x1="150"
+              y1="415"
+              x2="930"
+              y2="415"
+              stroke="#D6A84F"
+              stroke-width="2"/>
+
+        ${verseSvg}
+
+        <text x="540"
+              y="${referenceY}"
+              text-anchor="middle"
+              font-family="DejaVu Sans, sans-serif"
+              font-size="34"
+              font-weight="bold"
+              fill="#FFE6A0">${escapeXml(verse.reference)}</text>
+
+        <text x="540"
+              y="${translationY}"
+              text-anchor="middle"
+              font-family="DejaVu Sans, sans-serif"
+              font-size="22"
+              fill="#CBD5E1">${escapeXml(verse.translation || 'NKJV')}</text>
+
+        <text x="540"
+              y="${dateY}"
+              text-anchor="middle"
+              font-family="DejaVu Sans, sans-serif"
+              font-size="24"
+              fill="#D8E8DD">${escapeXml(getFormattedKenyaDate())}</text>
+
+        <text x="540"
+              y="${footerY}"
+              text-anchor="middle"
+              font-family="DejaVu Sans, sans-serif"
+              font-size="20"
+              fill="#FFFFFF">May the Word of God guide your steps today.</text>
+
+    </svg>`;
+
+    let image = sharp(Buffer.from(svg));
+
+    if (logoBuffer) {
+        image = image.composite([
+            {
+                input: logoBuffer,
+                left: 475,
+                top: 50
+            }
+        ]);
+    }
+
+    const imageBuffer = await image
+        .png()
+        .toBuffer();
+
+    await fs.promises.writeFile(
+        CONFIG.imagePath,
+        imageBuffer
+    );
+
+    log(`Bible verse image generated: ${imageBuffer.length} bytes`);
+
+    return imageBuffer;
+}
+
+// ============================================================
+// SEND VERSE TO WHATSAPP GROUP
+// ============================================================
+
+async function sendDailyVerse(options = {}) {
+    const { scheduled = false } = options;
+
+    if (!sock) {
+        throw new Error('WhatsApp is not connected.');
+    }
+
+    if (isSending) {
+        log('Another send is already in progress. Skipping.');
+        return;
+    }
+
+    isSending = true;
+
+    try {
+        log(
+            scheduled
+                ? 'Sending scheduled daily Bible verse...'
+                : 'Sending immediate group test...'
         );
 
-        console.log(`Sending verse card to group: ${CONFIG.groupId}`);
+        const targetGroupId = await resolveGroupId();
+        const verse = await fetchBibleVerse();
+        const imageBuffer = await generateVerseCardBuffer(verse);
 
-        await client.sendMessage(CONFIG.groupId, media, {
-            caption: '🌅 *Kimangu Youth Ministry - Daily Verse*'
+        await sock.sendMessage(targetGroupId, {
+            image: imageBuffer,
+            mimetype: 'image/png',
+            caption:
+                '🙏'
         });
 
-        console.log(
-            `Successfully sent the verse card for ${verse.reference}!`
-        );
+        log(`SUCCESS: Image sent to "${CONFIG.groupName}". Verse: ${verse.reference}`);
 
+        if (scheduled) {
+            lastScheduledDate = getKenyaDateKey();
+        }
     } catch (error) {
-        console.error('Failed to send the verse card:', error.message);
-
+        log(`FAILED TO SEND VERSE: ${error.message}`);
     } finally {
-        if (imagePath && fs.existsSync(imagePath)) {
-            fs.unlinkSync(imagePath);
-        }
-
-        console.log('Waiting for the WhatsApp operation to finish...');
-
-        await new Promise(resolve => setTimeout(resolve, 6000));
-
-        console.log('Closing WhatsApp client...');
-
-        try {
-            await client.destroy();
-        } catch (error) {
-            console.error('Error closing WhatsApp client:', error.message);
-        }
-
-
+        isSending = false;
     }
-});
+}
 
 // ============================================================
-// HANDLE AUTHENTICATION AND CONNECTION ERRORS
+// SCHEDULE DAILY VERSE
 // ============================================================
 
-client.on('authenticated', () => {
-    console.log('WhatsApp authenticated successfully.');
-});
+function startDailySchedule() {
+    if (cronTask) {
+        return;
+    }
 
-client.on('auth_failure', message => {
-    console.error('WhatsApp authentication failed:', message);
-});
+    cronTask = cron.schedule(
+        CONFIG.schedule,
+        async () => {
+            const today = getKenyaDateKey();
 
-client.on('disconnected', reason => {
-    console.log('WhatsApp disconnected:', reason);
-});
+            if (lastScheduledDate === today) {
+                log('The scheduled verse has already been sent today.');
+                return;
+            }
+
+            if (!sock) {
+                log('WhatsApp is disconnected. Cannot send the scheduled verse.');
+                return;
+            }
+
+            await sendDailyVerse({ scheduled: true });
+        },
+        { timezone: CONFIG.timezone }
+    );
+
+    log('Daily schedule activated: 5:00 AM Kenya time.');
+}
 
 // ============================================================
-// START AUTOMATION
+// CONNECT TO WHATSAPP
 // ============================================================
 
-console.log('Starting Daily Bible Verse Automation...');
-console.log('Timezone: ' + CONFIG.timezone);
-console.log('Destination group: ' + CONFIG.groupId);
+async function startBot() {
+    if (isConnecting || isShuttingDown) {
+        return;
+    }
 
-client.initialize();
+    isConnecting = true;
+
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(CONFIG.authDirectory);
+
+        sock = makeWASocket({
+            auth: state,
+            logger: pino({ level: 'silent' }),
+            browser: ['Kimangu Youth Ministry', 'Chrome', '1.0.0'],
+            syncFullHistory: false,
+            markOnlineOnConnect: false,
+            retryRequestDelayMs: 2000
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        sock.ev.on('connection.update', async update => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                console.log('\n====================================');
+                console.log('SCAN WHATSAPP QR CODE');
+                console.log('====================================');
+                qrcode.generate(qr, { small: true });
+                console.log('\nOpen WhatsApp > Linked devices > Link a device.');
+            }
+
+            if (connection === 'connecting') {
+                log('Connecting to WhatsApp...');
+            }
+
+            if (connection === 'open') {
+                log('WhatsApp connected successfully.');
+                isConnecting = false;
+                startDailySchedule();
+
+                if (!initialTestStarted) {
+                    initialTestStarted = true;
+                    await sendDailyVerse({ scheduled: false });
+                }
+            }
+
+            if (connection === 'close') {
+                isConnecting = false;
+                const statusCode =
+                    lastDisconnect?.error instanceof Boom
+                        ? lastDisconnect.error.output.statusCode
+                        : undefined;
+
+                const loggedOut = statusCode === DisconnectReason.loggedOut;
+                log(`WhatsApp connection closed. Status: ${statusCode ?? 'unknown'}`);
+                sock = null;
+
+                if (loggedOut) {
+                    log('WhatsApp logged out. Relink your account by scanning the QR code again.');
+                    return;
+                }
+
+                if (!isShuttingDown && !reconnectTimer) {
+                    reconnectTimer = setTimeout(() => {
+                        reconnectTimer = null;
+                        startBot().catch(error => {
+                            log(`Reconnect failed: ${error.message}`);
+                        });
+                    }, 5000);
+                }
+            }
+        });
+    } catch (error) {
+        isConnecting = false;
+        log(`BOT STARTUP ERROR: ${error.message}`);
+
+        if (!isShuttingDown && !reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                startBot().catch(err => {
+                    log(`Restart error: ${err.message}`);
+                });
+            }, 10000);
+        }
+    }
+}
+
+// ============================================================
+// SHUTDOWN HANDLING
+// ============================================================
+
+async function shutdown(signal) {
+    if (isShuttingDown) {
+        return;
+    }
+
+    isShuttingDown = true;
+    log(`Received ${signal}. Shutting down...`);
+
+    if (cronTask) {
+        cronTask.stop();
+        cronTask = null;
+    }
+
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+
+    try {
+        if (sock) {
+            sock.end(undefined);
+            sock = null;
+        }
+    } catch (error) {
+        log(`Shutdown error: ${error.message}`);
+    }
+
+    process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+// ============================================================
+// START APPLICATION
+// ============================================================
+
+console.log('');
+console.log('============================================');
+console.log('KIMANGU YOUTH MINISTRY');
+console.log('DAILY BIBLE VERSE IMAGE AUTOMATION');
+console.log('============================================');
+console.log('WhatsApp: Baileys');
+console.log('Bible translation: NKJV');
+console.log('Timezone: Africa/Nairobi');
+console.log('Schedule: Every day at 5:00 AM');
+console.log(`Destination: ${CONFIG.groupName}`);
+console.log('Image generation: SVG + Sharp');
+console.log('SDA logo:', fs.existsSync(CONFIG.logoPath) ? 'Found' : 'Not found - upload sda-logo.png');
+console.log('============================================');
+console.log('');
+
+startBot().catch(error => {
+    log(`Fatal startup error: ${error.message}`);
+});
